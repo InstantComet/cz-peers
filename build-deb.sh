@@ -1,9 +1,9 @@
 #!/bin/bash
-# Build cz-tailscale_<version>_all.deb into ./build. Needs dpkg-deb (any Debian/Ubuntu).
+# Build cz-peers_<version>_all.deb into ./build. Needs dpkg-deb (any Debian/Ubuntu).
 set -euo pipefail
 cd "$(dirname "$0")"
 VERSION=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' app-builder.json | head -1)
-PKG=cz-tailscale
+PKG=cz-peers
 python3 -m py_compile app/app.py app/qr.py
 root=$(mktemp -d); trap 'rm -rf "$root"' EXIT
 chmod 0755 "$root"

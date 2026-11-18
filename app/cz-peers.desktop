@@ -2,8 +2,8 @@
 Type=Application
 Name=Peers
 Comment=Unofficial Tailscale client: scan to log in, your tailnet's devices, SSH, exit node
-Exec=/usr/bin/python3 /usr/share/APPLaunch/apps/cz-tailscale/app.py
-Icon=share/images/cz-tailscale.png
+Exec=/usr/bin/python3 /usr/share/APPLaunch/apps/cz-peers/app.py
+Icon=share/images/cz-peers.png
 Terminal=true
 Categories=Network;
 StartupNotify=false

@@ -7,9 +7,10 @@ bold brightening, 7x15 px cells under a 20 px top bar, and the launcher's
 fonts. Run it on the CardputerZero (needs Pillow and the launcher's fonts).
 Pair it with tools/fake_tailscaled.py so only placeholder devices show.
 
-usage: screenshot.py REC.json MARK OUT.png [--qr]
+usage: screenshot.py REC.json MARK OUT.png [--qr] [--scale N]
   MARK: index of the checkpoint to show (0 = 'start', 1 = after the first key...)
   --qr: also paint the login QR code the way the app's overlay does
+  --scale N: draw at N x 320x170 with the fonts scaled up (sharp README/cover art)
 """
 import json
 import os
@@ -21,9 +22,10 @@ from PIL import Image, ImageDraw, ImageFont
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app'))
 
 FONT_DIR = '/usr/share/APPLaunch/share/font/'
-MONO = ImageFont.truetype(FONT_DIR + 'JetBrainsMono-Bold.ttf', 12)
-SYMBOLS = ImageFont.truetype(FONT_DIR + 'DejaVuSansMono.ttf', 12)
-TITLE = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 13)
+SCALE = int(sys.argv[sys.argv.index('--scale') + 1]) if '--scale' in sys.argv else 1
+MONO = ImageFont.truetype(FONT_DIR + 'JetBrainsMono-Bold.ttf', 12 * SCALE)
+SYMBOLS = ImageFont.truetype(FONT_DIR + 'DejaVuSansMono.ttf', 12 * SCALE)
+BAR = ImageFont.truetype(FONT_DIR + 'Montserrat-Bold.ttf', 13 * SCALE)
 PALETTE = [0x0D1117, 0xFF5F56, 0x27C93F, 0xFFBD2E, 0x2F81F7, 0xBC8CFF, 0x39C5CF, 0xF0F6FC,
            0x6E7681, 0xFFA198, 0x56D364, 0xE3B341, 0x79C0FF, 0xD2A8FF, 0x56D4DD, 0xFFFFFF]
 DEFAULT_FG, DEFAULT_BG = 7, 0
@@ -106,12 +108,17 @@ def replay(data, cols, rows):
 
 
 def top_bar(draw, title):
-    draw.rectangle((0, 0, 319, TOP - 1), fill=(0, 0, 0))
-    draw.text((4, 2), title, font=TITLE, fill=rgb(0xCCAA00))
-    for i, h in enumerate((4, 7, 10, 13)):  # wifi bars
-        draw.rectangle((262 + i * 6, 17 - h, 265 + i * 6, 16), fill=rgb(0x33CC33))
-    draw.rectangle((284, 3, 316, 16), fill=rgb(0x484847))  # battery 33x14
-    draw.rectangle((284, 3, 308, 16), fill=rgb(0x66CC33))
+    """The launcher's status bar, measured from a real fb0 grab: title, Wi-Fi
+    bars, then a clock pill and a battery pill (placeholder time and charge)."""
+    S = SCALE
+    draw.rectangle((0, 0, 320 * S - 1, TOP * S - 1), fill=(0, 0, 0))
+    draw.text((5 * S, 10 * S), title, font=BAR, fill=rgb(0xCCAA00), anchor='lm')
+    for i, top in enumerate((11, 8, 5, 2)):
+        x = 203 + i * 6
+        draw.rounded_rectangle((x * S, top * S, (x + 4) * S - 1, 17 * S - 1), 2 * S, fill=rgb(0x31CE31))
+    for x0, x1, colour, text in ((235, 275, 0x9C6531, '10:09'), (279, 315, 0xAC61A4, '80%')):
+        draw.rounded_rectangle((x0 * S, 2 * S, x1 * S - 1, 18 * S - 1), 3 * S, fill=rgb(colour))
+        draw.text(((x0 + x1) / 2 * S, 10 * S), text, font=BAR, fill=(255, 255, 255), anchor='mm')
 
 
 def main():
@@ -121,15 +128,15 @@ def main():
     data = d['data'].encode('latin1')[:end].decode('utf-8', errors='replace')
     cols, rows = d['cols'], d['rows']
     grid = replay(data, cols, rows)
-    img = Image.new('RGB', (320, 170), rgb(PALETTE[DEFAULT_BG]))
+    img = Image.new('RGB', (320 * SCALE, 170 * SCALE), rgb(PALETTE[DEFAULT_BG]))
     draw = ImageDraw.Draw(img)
     top_bar(draw, 'Peers')
     for y, line in enumerate(grid):
         for x, (ch, fg, bg, bold) in enumerate(line):
             if bold and fg < 8:
                 fg += 8
-            px, py = x * CW, TOP + y * CH
-            draw.rectangle((px, py, px + CW - 1, py + CH - 1), fill=rgb(PALETTE[bg]))
+            px, py = x * CW * SCALE, (TOP + y * CH) * SCALE
+            draw.rectangle((px, py, px + CW * SCALE - 1, py + CH * SCALE - 1), fill=rgb(PALETTE[bg]))
             if ch != ' ':
                 font = MONO if ord(ch) < 0x2000 else SYMBOLS
                 draw.text((px, py), ch, font=font, fill=rgb(PALETTE[fg]))
@@ -139,7 +146,8 @@ def main():
         rows_px = app.qr_image('https://login.tailscale.com/a/1a2b3c4d5e6f7',
                                app.LoginView.QR_COLS * CW, 10 * CH)
         qr = Image.frombytes('RGB', (len(rows_px[0]) // 2, len(rows_px)), b''.join(rows_px), 'raw', 'BGR;16')
-        img.paste(qr, (0, TOP))
+        qr = qr.resize((qr.width * SCALE, qr.height * SCALE), Image.NEAREST)
+        img.paste(qr, (0, TOP * SCALE))
     img.save(out)
 
 

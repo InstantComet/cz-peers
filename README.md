@@ -19,8 +19,10 @@ launcher. It runs in the launcher's built-in terminal.
 From the CardputerZero app store, or build the package on the device:
 
 ```sh
-sudo bash install.sh        # builds build/cz-tailscale_<version>_all.deb and installs it
+sudo bash install.sh        # builds build/cz-peers_<version>_all.deb and installs it
 ```
+
+The package was called `cz-tailscale` up to 1.1.0; installing `cz-peers` replaces it and keeps the saved SSH users.
 
 The package makes the desktop user Tailscale's operator (`tailscale set --operator`), so the app
 can change settings without sudo.

@@ -1,4 +1,4 @@
-Package: cz-tailscale
+Package: cz-peers
 Version: @VERSION@
 Architecture: all
 Maintainer: InstantComet <10364622+InstantComet@users.noreply.github.com>
@@ -6,7 +6,9 @@ Section: net
 Priority: optional
 Depends: python3, openssh-client
 Recommends: tailscale
-Homepage: https://github.com/InstantComet/cz-tailscale
+Replaces: cz-tailscale
+Conflicts: cz-tailscale
+Homepage: https://github.com/InstantComet/cz-peers
 Description: Peers: unofficial Tailscale device list for the CardputerZero launcher
  Lists the devices on your tailnet with their state and connection path, and
  lets you log in by scanning a QR code, SSH to a device in the launcher's

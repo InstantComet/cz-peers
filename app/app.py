@@ -35,11 +35,11 @@ from datetime import datetime, timezone
 
 import qr
 
-VERSION = '1.1.0'
+VERSION = '1.1.1'
 SOCK = os.environ.get('CZ_TS_SOCKET', '/var/run/tailscale/tailscaled.sock')
-CONFIG_DIR = Path.home() / '.config/cz-tailscale'
+CONFIG_DIR = Path.home() / '.config/cz-peers'
 HOSTS_FILE = CONFIG_DIR / 'hosts.json'
-CLIP_FILE = Path.home() / '.cache/cz-tailscale/clipboard'
+CLIP_FILE = Path.home() / '.cache/cz-peers/clipboard'
 ASCII = os.environ.get('CZ_TS_ASCII') == '1'
 # CardputerZero convention (as in the launcher's apps): F/X/Z/C are up/down/left/right
 UP_KEYS = ('UP', 'f', 'F', ';')
@@ -347,6 +347,28 @@ def human_bytes(n):
         n /= 1024
 
 
+def ssh_alias(node):
+    """The name ssh is given for a device: its short tailnet name, so that a
+    `Host <name>` block in ~/.ssh/config (IdentityFile, ProxyJump, ...) applies.
+    Falls back to the IP when the name is not a plain host name."""
+    name = node.name or ''
+    ok = name and name[0].isalnum() and all(c.isalnum() or c in '-.' for c in name)
+    return name if ok else node.ip
+
+
+def ssh_argv(node, user, port):
+    """ssh by device name, but always to its Tailscale IP: -o HostName on the
+    command line beats any HostName in ~/.ssh/config and needs no MagicDNS,
+    while Host/Match blocks for the name still supply keys and other options."""
+    argv = ['ssh', '-o', 'ConnectTimeout=15']
+    alias = ssh_alias(node)
+    if alias != node.ip:
+        argv += ['-o', 'HostName=' + node.ip]
+    if port != '22':
+        argv += ['-p', port]
+    return argv + ['%s@%s' % (user, alias)]
+
+
 class Node:
     def __init__(self, raw, suffix, users):
         self.raw = raw
@@ -419,6 +441,12 @@ class Model:
 def load_hosts():
     try:
         return json.loads(HOSTS_FILE.read_text())
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        return {}
+    try:  # saved by the package's earlier name, cz-tailscale (1.1.0 and older)
+        return json.loads((Path.home() / '.config/cz-tailscale/hosts.json').read_text())
     except (OSError, ValueError):
         return {}
 
@@ -643,13 +671,13 @@ class HelpView(ScrollText):
             ('l', 'log in (shows a QR code to scan)'),
             ('o', 'log out (in the m page)'),
             ('', ''),
-            ('', 'There is no system clipboard. "Copy" saves the IP to ~/.cache/cz-tailscale/clipboard; '
+            ('', 'There is no system clipboard. "Copy" saves the IP to ~/.cache/cz-peers/clipboard; '
                  'in the CLI app type ts-clip to print it, e.g. scp f pi@$(ts-clip):'),
             ('', '"Shell here" opens bash with $IP and $HOST set to the device.'),
             ('', ''),
             ('', 'Changing settings needs: sudo tailscale set --operator=$USER '
                  '(the app offers to run it when a change is refused).'),
-            ('', 'Peers (cz-tailscale) %s' % VERSION, DIM),
+            ('', 'Peers (cz-peers) %s' % VERSION, DIM),
             ('', 'Unofficial app, not affiliated with or endorsed by Tailscale Inc. Tailscale is a registered trademark of Tailscale Inc.', DIM),
         ]
 
@@ -953,7 +981,7 @@ class SSHPrompt(View):
             rows.append(row)
             rows.append(Row())
         user, port = self.fields[0][1], self.fields[1][1]
-        cmd = 'ssh %s%s@%s' % ('-p %s ' % port if port != '22' else '', user, self.node.ip)
+        cmd = 'ssh %s%s@%s' % ('-p %s ' % port if port != '22' else '', user, ssh_alias(self.node))
         rows.append(text_row('  ' + cmd, DIM))
         rows += [Row()] * (h - 1 - len(rows))
         return rows + [footer([('Enter', 'connect'), ('Tab', 'field'), ('Esc', 'back')])]
@@ -1310,11 +1338,9 @@ class App:
         self.hosts[node.name] = {'user': user, 'port': port}
         self.hosts['_default'] = {'user': user}
         save_hosts(self.hosts)
-        argv = ['ssh', '-o', 'ConnectTimeout=15']
-        if port != '22':
-            argv += ['-p', port]
-        argv.append('%s@%s' % (user, node.ip))
-        self.term.run_interactive(argv, '\x1b[33m%s\x1b[0m  %s' % (' '.join(argv[3:]), node.name))
+        argv = ssh_argv(node, user, port)
+        shown = 'ssh %s%s@%s' % ('-p %s ' % port if port != '22' else '', user, ssh_alias(node))
+        self.term.run_interactive(argv, '\x1b[33m%s\x1b[0m  %s' % (shown, node.ip))
         self.refresh_now()
 
     def api_failed(self, err):
@@ -1503,7 +1529,7 @@ class App:
 
 def main():
     if not sys.stdin.isatty():
-        print('cz-tailscale needs a terminal (the launcher entry runs it in one).', file=sys.stderr)
+        print('cz-peers needs a terminal (the launcher entry runs it in one).', file=sys.stderr)
         return 1
     # ssh and bash run in this terminal; the launcher's own shell uses st-256color
     if os.environ.get('TERM', 'dumb') in ('dumb', 'linux', ''):

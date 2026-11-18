@@ -1,8 +1,8 @@
 {
-  "package_name": "cz-tailscale",
-  "version": "1.1.0",
+  "package_name": "cz-peers",
+  "version": "1.1.1",
   "app_name": "Peers",
-  "bin_name": "cz-tailscale",
+  "bin_name": "cz-peers",
   "description": "Tailnet device list with one-key SSH in the built-in terminal",
   "store": {
     "summary": "Peers for Tailscale (unofficial): log in by scanning a QR code, see your tailnet's devices, SSH to one with a key press, copy IPs, pick an exit node",
@@ -11,7 +11,7 @@
     "screenshots": ["screenshots/list.png", "screenshots/login.png", "screenshots/menu.png", "screenshots/ssh.png"],
     "icon": "screenshots/icon.png",
     "license": "MIT",
-    "source_repo": "https://github.com/InstantComet/cz-tailscale",
+    "source_repo": "https://github.com/InstantComet/cz-peers",
     "author": { "github": "InstantComet", "display_name": "InstantComet" },
     "share_code": "TSNT",
     "permissions": {
