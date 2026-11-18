@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 import qr
 
-VERSION = '1.2.0'
+VERSION = '1.2.1'
 SOCK = os.environ.get('CZ_TS_SOCKET', '/var/run/tailscale/tailscaled.sock')
 CONFIG_DIR = Path.home() / '.config/cz-peers'
 HOSTS_FILE = CONFIG_DIR / 'hosts.json'
@@ -547,6 +547,16 @@ def install_command(node, pub):
     return windows_install_command(pub) if node.os.lower() == 'windows' else posix_install_command(pub)
 
 
+def takes_password(node, methods):
+    """Whether a refusing server would take a password. Windows OpenSSH lists
+    keyboard-interactive even with `PasswordAuthentication no` and then never
+    asks, so there only `password` counts; elsewhere keyboard-interactive is
+    normally PAM asking for the password."""
+    if 'password' in methods:
+        return True
+    return 'keyboard-interactive' in methods and node.os.lower() != 'windows'
+
+
 def ssh_failure(text):
     """Why an ssh run that exited 255 failed, from its stderr:
     ('hostkey' | 'denied' | 'refused' | 'timeout' | 'dns' | None, auth methods offered)."""
@@ -1009,7 +1019,7 @@ class SelfView(ScrollText):
         if st.get('Version'):
             out.append(('Version', st['Version'].split('-')[0]))
         found = find_key()
-        out.append(('SSH key', '%s ~/.ssh/%s  (k)' % (found[1].split()[0], found[0].name) if found
+        out.append(('SSH key', '~/.ssh/%s (k)' % found[0].name if found
                     else 'none yet (k to make one)', WHITE if found else MUTED))
         return out
 
@@ -1728,9 +1738,9 @@ class App:
         elif why == 'denied' and node.tailscale_ssh:
             self.flash('Tailscale SSH refused %s: check the tailnet SSH policy' % where, RED, 8)
         elif why == 'denied' and installing:
-            self.flash('Wrong password for %s?' % where if 'password' in methods or 'keyboard-interactive' in methods
+            self.flash('Wrong password for %s?' % where if takes_password(node, methods)
                        else '%s takes no passwords: add the key by hand (K)' % node.name, RED, 8)
-        elif why == 'denied' and ('password' in methods or 'keyboard-interactive' in methods):
+        elif why == 'denied' and takes_password(node, methods):
             self.push(ConfirmView(
                 self, 'Key not accepted', '%s did not accept a key from this Cardputer. Add your SSH key '
                 'there now? You type the password once; ssh then logs in without it.' % where,
