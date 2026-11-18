@@ -1,0 +1,17 @@
+Package: cz-tailscale
+Version: @VERSION@
+Architecture: all
+Maintainer: InstantComet <10364622+InstantComet@users.noreply.github.com>
+Section: net
+Priority: optional
+Depends: python3, openssh-client
+Recommends: tailscale
+Homepage: https://github.com/InstantComet/cz-tailscale
+Description: Peers: unofficial Tailscale device list for the CardputerZero launcher
+ Lists the devices on your tailnet with their state and connection path, and
+ lets you log in by scanning a QR code, SSH to a device in the launcher's
+ built-in terminal, copy its address,
+ tailscale ping it, choose an exit node, and turn Tailscale on or off.
+ .
+ Unofficial app, not affiliated with or endorsed by Tailscale Inc.
+ Tailscale is a registered trademark of Tailscale Inc.

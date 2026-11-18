@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+# Let the desktop user change Tailscale settings (on/off, exit node) without
+# sudo. Reading status needs nothing. Skipped quietly if Tailscale is absent.
+if [ "$1" = configure ] && command -v tailscale >/dev/null 2>&1; then
+    user=$(getent passwd 1000 | cut -d: -f1)
+    if [ -n "$user" ]; then
+        timeout 10 tailscale set --operator="$user" >/dev/null 2>&1 || true
+    fi
+fi
+exit 0
