@@ -11,7 +11,7 @@ install -D -m 0644 app/app.py             "$root/usr/share/APPLaunch/apps/$PKG/a
 install -D -m 0644 app/qr.py              "$root/usr/share/APPLaunch/apps/$PKG/qr.py"
 install -D -m 0644 app/$PKG.desktop       "$root/usr/share/APPLaunch/applications/$PKG.desktop"
 install -D -m 0644 app/$PKG.png           "$root/usr/share/APPLaunch/share/images/$PKG.png"
-install -D -m 0755 ts-clip                "$root/usr/bin/ts-clip"
+install -D -m 0755 cz-peers-clip                "$root/usr/bin/cz-peers-clip"
 install -D -m 0644 LICENSE                "$root/usr/share/doc/$PKG/copyright"
 install -d -m 0755 "$root/DEBIAN"
 sed "s/@VERSION@/$VERSION/" debian/control.in > "$root/DEBIAN/control"

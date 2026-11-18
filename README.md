@@ -9,7 +9,7 @@ launcher. It runs in the launcher's built-in terminal.
   on its screen. You can also log out (`m`, then `o`).
 - **Devices:** lists every device on your tailnet with its IP and how you reach it (direct,
   DERP relay, or when it was last seen). Press `/` to filter.
-- **Per device:** SSH in the same terminal, copy the IP/DNS name (read it back with `ts-clip`),
+- **Per device:** SSH in the same terminal, copy the IP/DNS name (read it back with `cz-peers-clip`),
   `tailscale ping`, details, a shell with `$IP` set, use as exit node.
 - **This Cardputer:** IPs, account, key expiry, connect/disconnect, exit node, LAN access.
 - No Tailscale yet? Press Enter to install it with the official script.

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Print the address last copied in Peers (cz-peers), e.g.  ssh pi@$(cz-peers-clip)
+exec head -n 1 "$HOME/.cache/cz-peers/clipboard" 2>/dev/null

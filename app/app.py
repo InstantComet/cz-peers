@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 import qr
 
-VERSION = '1.1.1'
+VERSION = '1.1.2'
 SOCK = os.environ.get('CZ_TS_SOCKET', '/var/run/tailscale/tailscaled.sock')
 CONFIG_DIR = Path.home() / '.config/cz-peers'
 HOSTS_FILE = CONFIG_DIR / 'hosts.json'
@@ -672,7 +672,7 @@ class HelpView(ScrollText):
             ('o', 'log out (in the m page)'),
             ('', ''),
             ('', 'There is no system clipboard. "Copy" saves the IP to ~/.cache/cz-peers/clipboard; '
-                 'in the CLI app type ts-clip to print it, e.g. scp f pi@$(ts-clip):'),
+                 'in the CLI app type cz-peers-clip to print it, e.g. scp f pi@$(cz-peers-clip):'),
             ('', '"Shell here" opens bash with $IP and $HOST set to the device.'),
             ('', ''),
             ('', 'Changing settings needs: sudo tailscale set --operator=$USER '
@@ -1330,7 +1330,7 @@ class App:
         try:
             CLIP_FILE.parent.mkdir(parents=True, exist_ok=True)
             CLIP_FILE.write_text(text + '\n')
-            self.flash('Copied %s  (ts-clip)' % text)
+            self.flash('Copied %s  (cz-peers-clip)' % text)
         except OSError as e:
             self.flash('Copy failed: %s' % e, RED)
 
