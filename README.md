@@ -11,6 +11,13 @@ launcher. It runs in the launcher's built-in terminal.
   DERP relay, or when it was last seen). Press `/` to filter.
 - **Per device:** SSH in the same terminal, copy the IP/DNS name (read it back with `cz-peers-clip`),
   `tailscale ping`, details, a shell with `$IP` set, use as exit node.
+- **SSH keys:** `K` (or `m`, then `k`) makes an SSH key if there is none and shows the public key
+  as a QR code to scan with a phone. `k` on a device logs in once with its password and adds the
+  key to its `authorized_keys` (Linux and macOS; on Windows the admin or user key file, with the
+  permissions sshd wants), then lists it in a Peers section of `~/.ssh/config`. If ssh is refused,
+  the app explains why and offers the next step: add the key, show it, or forget a changed host
+  key. New host keys are accepted without the yes/no question, since Tailscale has already
+  checked the device. Devices that run Tailscale SSH (no key needed) have a blue `S`.
 - **This Cardputer:** IPs, account, key expiry, connect/disconnect, exit node, LAN access.
 - No Tailscale yet? Press Enter to install it with the official script.
 
@@ -38,6 +45,8 @@ small built-in QR encoder, so the package has no extra dependencies.
 
 - `tools/fake_tailscaled.py` serves a fake LocalAPI with placeholder devices. Run the app with
   `CZ_TS_SOCKET=<socket>` to try logging in and out without touching the real tailscaled.
+  `FAKE_LOOPBACK=1` adds a device at 127.0.0.1 (this machine's own sshd) to try the ssh error
+  hints; `CZ_TS_SSH_DIR=<dir>` makes the app keep its key and ssh config there instead of `~/.ssh`.
 - `tools/drive.py` runs the app in a 45x10 pty and types keys. `tools/show.py` prints the screens.
 - `tools/screenshot.py` renders a recording the way the launcher's terminal draws it (its 16-colour
   palette, fonts and cell size). The store screenshots were made this way from the fake daemon.

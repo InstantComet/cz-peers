@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 import qr
 
-VERSION = '1.1.2'
+VERSION = '1.2.0'
 SOCK = os.environ.get('CZ_TS_SOCKET', '/var/run/tailscale/tailscaled.sock')
 CONFIG_DIR = Path.home() / '.config/cz-peers'
 HOSTS_FILE = CONFIG_DIR / 'hosts.json'
@@ -53,6 +53,7 @@ WHITE, MUTED, DIM = (255, 255, 255), (167, 176, 187), (100, 108, 118)
 BLUE, GREEN, YELLOW, RED = (79, 179, 255), (51, 224, 106), (255, 204, 26), (255, 90, 82)
 BLACK, SEL_BG, BAR_BG = (0, 0, 0), (32, 58, 88), (28, 35, 43)
 DOT_ON, DOT_OFF, CURSOR = ('*', '-', '>') if ASCII else ('●', '○', '▸')
+TS_SSH_MARK = 'S'  # after a device name: it runs Tailscale SSH
 
 
 def S(fg=WHITE, bg=None, bold=False):
@@ -359,14 +360,209 @@ def ssh_alias(node):
 def ssh_argv(node, user, port):
     """ssh by device name, but always to its Tailscale IP: -o HostName on the
     command line beats any HostName in ~/.ssh/config and needs no MagicDNS,
-    while Host/Match blocks for the name still supply keys and other options."""
-    argv = ['ssh', '-o', 'ConnectTimeout=15']
+    while Host/Match blocks for the name still supply keys and other options.
+
+    New host keys are accepted without the yes/no question: the connection
+    goes over Tailscale, which has already checked who the device is. A host
+    key that changed is still refused (the app then offers to forget it)."""
+    argv = ['ssh', '-o', 'ConnectTimeout=15', '-o', 'StrictHostKeyChecking=accept-new']
     alias = ssh_alias(node)
     if alias != node.ip:
         argv += ['-o', 'HostName=' + node.ip]
     if port != '22':
         argv += ['-p', port]
     return argv + ['%s@%s' % (user, alias)]
+
+
+def ssh_shown(node, user, port):
+    return 'ssh %s%s@%s' % ('-p %s ' % port if port != '22' else '', user, ssh_alias(node))
+
+
+# ---------------------------------------------------------------- SSH keys --
+SSH_DIR = Path(os.environ.get('CZ_TS_SSH_DIR') or Path.home() / '.ssh')
+KEY_NAMES = ('id_ed25519', 'id_ecdsa', 'id_rsa')  # the ones ssh offers by default
+CONFIG_BEGIN = '# >>> Peers (cz-peers): keys it installed on these devices >>>'
+CONFIG_END = '# <<< Peers (cz-peers) <<<'
+
+
+def find_key():
+    """This user's default SSH key as (private key path, public key text), or None."""
+    for name in KEY_NAMES:
+        priv, pub = SSH_DIR / name, SSH_DIR / (name + '.pub')
+        if not priv.exists():
+            continue
+        try:
+            text = pub.read_text().strip()
+        except OSError:
+            # a private key without its .pub: derive the public half
+            try:
+                text = subprocess.run(['ssh-keygen', '-y', '-f', str(priv)], capture_output=True, text=True,
+                                      stdin=subprocess.DEVNULL, timeout=10).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                text = ''
+        if text.startswith(('ssh-', 'ecdsa-', 'sk-')):
+            return priv, text
+    return None
+
+
+def make_key():
+    """Create ~/.ssh/id_ed25519 (no passphrase). Returns (path, public key) or raises OSError."""
+    SSH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    priv = SSH_DIR / 'id_ed25519'
+    comment = '%s@%s' % (ME, socket.gethostname())
+    try:
+        r = subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', str(priv)],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+    except subprocess.SubprocessError as e:
+        raise OSError(str(e)) from e
+    if r.returncode != 0:
+        raise OSError((r.stderr or r.stdout).strip() or 'ssh-keygen failed (%d)' % r.returncode)
+    found = find_key()
+    if not found:
+        raise OSError('ssh-keygen made no key')
+    return found
+
+
+def key_fingerprint(pub):
+    """('ED25519', 'SHA256:...') for a public key line."""
+    try:
+        r = subprocess.run(['ssh-keygen', '-l', '-f', '-'], input=pub + '\n', capture_output=True,
+                           text=True, timeout=10)
+        parts = r.stdout.split()
+        if r.returncode == 0 and len(parts) >= 2:
+            return parts[-1].strip('()'), parts[1]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return pub.split()[0], ''
+
+
+def config_path_for(priv):
+    home = str(Path.home())
+    path = str(priv)
+    return '~' + path[len(home):] if path.startswith(home + '/') else path
+
+
+def remember_key_in_config(alias, priv):
+    """Add `Host <alias> / IdentityFile <key>` to a section of ~/.ssh/config
+    that Peers owns, so plain ssh to the device (e.g. from "Shell here") uses
+    the key too, even under an earlier `IdentitiesOnly yes`. Leaves the rest
+    of the file as it is."""
+    path = SSH_DIR / 'config'
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        text = ''
+    lines = text.split('\n')
+    entries, outside, inside = {}, [], False
+    host = None
+    for line in lines:
+        s = line.strip()
+        if s == CONFIG_BEGIN:
+            inside = True
+        elif s == CONFIG_END:
+            inside = False
+        elif inside:
+            if s.lower().startswith('host '):
+                host = s[5:].strip()
+            elif s.lower().startswith('identityfile ') and host:
+                entries[host] = s[13:].strip()
+        else:
+            outside.append(line)
+    want = config_path_for(priv)
+    if entries.get(alias) == want:
+        return
+    entries[alias] = want
+    while outside and outside[-1] == '':
+        outside.pop()
+    section = [CONFIG_BEGIN]
+    for h in sorted(entries):
+        section += ['Host ' + h, '    IdentityFile ' + entries[h]]
+    section.append(CONFIG_END)
+    body = '\n'.join(outside + ([''] if outside else []) + section) + '\n'
+    SSH_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = path.with_name('config.cz-peers.tmp')
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(body)
+    tmp.replace(path)
+
+
+def posix_install_command(pub):
+    """Remote command that appends pub to ~/.ssh/authorized_keys once (any
+    POSIX-ish login shell; the script itself runs under sh)."""
+    k = shlex.quote(pub)
+    script = ('umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && f=~/.ssh/authorized_keys && touch "$f" && '
+              'chmod 600 "$f" && if grep -qxF %s "$f"; then echo "Key already in $f"; else '
+              '{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; '
+              'echo %s >> "$f" && echo "Added the key to $f"; }; fi' % (k, k))
+    return 'sh -c ' + shlex.quote(script)
+
+
+WINDOWS_INSTALL_PS = r'''
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$k = '%s'
+try {
+  $admin = [bool](whoami /groups | Select-String 'S-1-5-32-544')
+  $cfg = Join-Path $env:ProgramData 'ssh\sshd_config'
+  $match = (Test-Path $cfg) -and (Select-String -Path $cfg -Pattern '^\s*Match\s+Group\s+administrators' -Quiet)
+  if ($admin -and $match) {
+    $f = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+  } else {
+    $d = Join-Path $HOME '.ssh'
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    $f = Join-Path $d 'authorized_keys'
+  }
+  $old = ''
+  if (Test-Path $f) { $old = [IO.File]::ReadAllText($f) }
+  if (($old -split "`r?`n") -contains $k) {
+    Write-Output "Key already in $f"
+  } else {
+    if ($old.Length -gt 0 -and -not $old.EndsWith("`n")) { $old += "`r`n" }
+    [IO.File]::WriteAllText($f, $old + $k + "`r`n", (New-Object Text.UTF8Encoding $false))
+    Write-Output "Added the key to $f"
+  }
+  if ($f -like '*administrators_authorized_keys') {
+    icacls $f /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null
+    if ($LASTEXITCODE) { throw "icacls could not set the permissions sshd needs on $f" }
+  }
+  exit 0
+} catch {
+  Write-Output "Failed: $_"
+  exit 1
+}
+'''
+
+
+def windows_install_command(pub):
+    """Remote command for Windows OpenSSH (works whether its shell is cmd or
+    PowerShell). Admins' keys go to administrators_authorized_keys when
+    sshd_config has the stock `Match Group administrators` block."""
+    script = WINDOWS_INSTALL_PS % pub.replace("'", "''")
+    encoded = base64.b64encode(script.encode('utf-16-le')).decode()
+    return 'powershell -NoProfile -NonInteractive -EncodedCommand ' + encoded
+
+
+def install_command(node, pub):
+    return windows_install_command(pub) if node.os.lower() == 'windows' else posix_install_command(pub)
+
+
+def ssh_failure(text):
+    """Why an ssh run that exited 255 failed, from its stderr:
+    ('hostkey' | 'denied' | 'refused' | 'timeout' | 'dns' | None, auth methods offered)."""
+    if 'REMOTE HOST IDENTIFICATION HAS CHANGED' in text or 'Host key verification failed' in text:
+        return 'hostkey', []
+    denied = [line for line in text.splitlines() if 'Permission denied (' in line]
+    if denied:
+        methods = denied[-1].rsplit('(', 1)[1].split(')')[0].split(',')
+        return 'denied', [m.strip() for m in methods if m.strip()]
+    if 'Connection refused' in text:
+        return 'refused', []
+    if 'timed out' in text:
+        return 'timeout', []
+    if 'Could not resolve hostname' in text:
+        return 'dns', []
+    return None, []
 
 
 class Node:
@@ -388,7 +584,9 @@ class Node:
         self.id = raw.get('ID') or ''
         self.exit_node = bool(raw.get('ExitNode'))
         self.exit_option = bool(raw.get('ExitNodeOption'))
-        user = users.get(str(raw.get('UserID')), {})
+        # the device runs Tailscale SSH: tailnet identity, no key needed
+        self.tailscale_ssh = bool(raw.get('sshHostKeys'))
+        user =users.get(str(raw.get('UserID')), {})
         self.owner = user.get('LoginName') or user.get('DisplayName') or ''
 
     @property
@@ -551,14 +749,37 @@ class Terminal:
             if keys:
                 return keys[0]
 
-    def run_interactive(self, argv, banner, env=None):
-        """Run a program in the plain terminal, then come back."""
+    def run_interactive(self, argv, banner, env=None, capture=False):
+        """Run a program in the plain terminal, then come back. Returns the
+        exit code, or (code, stderr text) with capture=True: stderr is then
+        still shown as it arrives, and its last 8 KB are kept. Password
+        prompts go to /dev/tty, not stderr, so they are not affected."""
         self.leave()
         sys.stdout.write('\x1b[2J\x1b[H' + banner + '\r\n')
         sys.stdout.flush()
         old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        err = bytearray()
         try:
-            code = subprocess.call(argv, env=env, preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            proc = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE if capture else None,
+                                    preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            if capture:
+                out = sys.stdout.fileno()
+                pipe = proc.stderr.fileno()
+                # read until EOF, or until the process has gone and nothing more
+                # is waiting (a ControlPersist master may keep the pipe open)
+                while True:
+                    r, _, _ = select.select([pipe], [], [], 0.2)
+                    if r:
+                        chunk = os.read(pipe, 4096)
+                        if not chunk:
+                            break
+                        os.write(out, chunk)
+                        err += chunk
+                        del err[:-8192]
+                    elif proc.poll() is not None:
+                        break
+                proc.stderr.close()
+            code = proc.wait()
         except OSError as e:
             sys.stdout.write('%s\r\n' % e)
             code = -1
@@ -569,7 +790,7 @@ class Terminal:
         termios.tcflush(self.fd, termios.TCIFLUSH)
         self.wait_key()
         self.enter()
-        return code
+        return (code, err.decode(errors='replace')) if capture else code
 
 
 # ------------------------------------------------------------------ views --
@@ -661,6 +882,8 @@ class HelpView(ScrollText):
             ('C / Enter', 'actions for the device'),
             ('Z / Esc', 'back (Esc in the list quits)'),
             ('s', 'SSH to the device'),
+            ('k', 'install my SSH key on the device'),
+            ('K', "this Cardputer's SSH key (QR code)"),
             ('y', 'copy its IP (see below)'),
             ('p', 'tailscale ping'),
             ('i', 'device details'),
@@ -674,6 +897,12 @@ class HelpView(ScrollText):
             ('', 'There is no system clipboard. "Copy" saves the IP to ~/.cache/cz-peers/clipboard; '
                  'in the CLI app type cz-peers-clip to print it, e.g. scp f pi@$(cz-peers-clip):'),
             ('', '"Shell here" opens bash with $IP and $HOST set to the device.'),
+            ('', ''),
+            ('', 'SSH keys: K shows (or makes) this Cardputer\'s key; scan its QR code to get the '
+                 'public key. k on a device logs in once with its password and adds the key there '
+                 '(Linux, macOS and Windows), so ssh needs no password after that. If ssh is refused, '
+                 'the app offers this by itself.'),
+            ('', 'A blue %s after a name: the device runs Tailscale SSH, so no key is needed.' % TS_SSH_MARK),
             ('', ''),
             ('', 'Changing settings needs: sudo tailscale set --operator=$USER '
                  '(the app offers to run it when a change is refused).'),
@@ -719,16 +948,20 @@ class DetailsView(ScrollText):
             out.append(('Exit node', 'in use', YELLOW))
         elif n.exit_option:
             out.append(('Exit node', 'offered'))
+        if n.tailscale_ssh:
+            out.append(('SSH', 'Tailscale SSH (no key needed)', BLUE))
         saved = self.app.hosts.get(n.name, {})
         if saved.get('user'):
             out.append(('SSH as', '%s (port %s)' % (saved['user'], saved.get('port', '22'))))
+        if saved.get('key'):
+            out.append(('SSH key', 'installed for %s' % saved['key'], GREEN))
         return out
 
     def hints(self):
-        return [('Z', 'back'), ('s', 'ssh'), ('p', 'ping'), ('y', 'copy')]
+        return [('Z', 'back'), ('s', 'ssh'), ('k', 'add key'), ('p', 'ping')]
 
     def key(self, k):
-        if k in ('s', 'p', 'y', 'h'):
+        if k in ('s', 'p', 'y', 'h', 'k'):
             return self.app.node_action(k, self.node)
         return super().key(k)
 
@@ -775,14 +1008,20 @@ class SelfView(ScrollText):
             out.append(('Warning', h, YELLOW))
         if st.get('Version'):
             out.append(('Version', st['Version'].split('-')[0]))
+        found = find_key()
+        out.append(('SSH key', '%s ~/.ssh/%s  (k)' % (found[1].split()[0], found[0].name) if found
+                    else 'none yet (k to make one)', WHITE if found else MUTED))
         return out
 
     def hints(self):
         if self.app.model.state in ('NeedsLogin', 'NoState'):
-            return [('Z', 'back'), ('l', 'log in')]
-        return [('Z', 'back'), ('t', 'on/off'), ('e', 'exit'), ('o', 'log out')]
+            return [('Z', 'back'), ('l', 'log in'), ('k', 'ssh key')]
+        return [('Z', 'back'), ('t', 'on/off'), ('e', 'exit'), ('o', 'logout'), ('k', 'key')]
 
     def key(self, k):
+        if k in ('k', 'K'):
+            self.app.push(KeyView(self.app))
+            return True
         if k in ('t', 'e', 'l'):
             return self.app.list_view.key(k)
         if k == 'o':
@@ -898,6 +1137,103 @@ class LoginView(View):
         return True
 
 
+class KeyView(View):
+    """This Cardputer's SSH key: makes one if there is none, shows the public
+    key as a QR code (scan it with a phone and paste it into authorized_keys),
+    copies it, or lists it as text."""
+    QR_COLS = 22
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.as_text = False
+        self.top = 0
+        self.load()
+
+    def load(self):
+        self.found = find_key()
+        self.image = None
+        self.kind = self.fingerprint = ''
+        if self.found:
+            self.kind, self.fingerprint = key_fingerprint(self.found[1])
+            if self.app.overlay.available:
+                self.image = qr_image(self.found[1], self.QR_COLS * Overlay.CELL_W, 10 * Overlay.CELL_H)
+
+    def generate(self):
+        try:
+            make_key()
+            self.app.flash('Made ~/.ssh/id_ed25519')
+        except OSError as e:
+            self.app.flash('Could not make a key: %s' % e, RED, 6)
+        self.load()
+
+    def overlay_image(self):
+        return (0, 0, self.image) if self.image and not self.as_text else None
+
+    def render(self, w, h):
+        if not self.found:
+            rows = [header('SSH key', '', w), Row()]
+            rows += [text_row(' ' + line) for line in wrap(
+                'This Cardputer has no SSH key yet, so ssh can only log in with passwords.', w - 2)]
+            rows.append(Row())
+            rows += [text_row(' ' + line, MUTED) for line in wrap(
+                'Press g to make one (ed25519, saved as ~/.ssh/id_ed25519).', w - 2)]
+            rows = rows[:h - 1] + [Row()] * max(0, h - 1 - len(rows))
+            return rows + [footer([('Z', 'back'), ('g', 'make key')])]
+        hints = [('Z', 'back'), ('y', 'copy'), ('t', 'text' if not self.as_text else 'QR')]
+        pub = self.found[1]
+        if self.image and not self.as_text and w >= self.QR_COLS + 20 and h >= 10:
+            rw = w - self.QR_COLS - 1
+            lines = [('SSH key', WHITE, True), (self.kind + ' ' + self.fingerprint[7:15], MUTED, False),
+                     ('', WHITE, False)]
+            lines += [(part, MUTED, False) for part in wrap(
+                'Scan for the public key and add it to authorized_keys there. '
+                'Or press k on a device.', rw)]
+            lines = lines[:h - 1] + [('', WHITE, False)] * max(0, h - 1 - len(lines))
+            rows = []
+            for text, colour, bold in lines:
+                row = Row([(' ' * self.QR_COLS, S(WHITE, WHITE)), (' ', S())])
+                row.add(text, S(colour, None, bold))
+                rows.append(row)
+            foot = footer(hints)
+            foot.segs.insert(0, (' ' * self.QR_COLS, S(WHITE, WHITE)))
+            return rows + [foot]
+        body = [text_row(' %s ~/.ssh/%s' % (self.kind, self.found[0].name), MUTED)]
+        if self.fingerprint:
+            body.append(text_row(' ' + self.fingerprint, MUTED))
+        body += [text_row(' ' + line) for line in wrap(pub, w - 2)]
+        if not self.app.overlay.available:
+            body += [Row()] + [text_row(' ' + line, DIM) for line in
+                               wrap('Open this app on the Cardputer itself to see a QR code.', w - 2)]
+        body_h = h - 2
+        self.top = max(0, min(self.top, len(body) - body_h))
+        more = '%d/%d' % (min(self.top + body_h, len(body)), len(body)) if len(body) > body_h else ''
+        rows = body[self.top:self.top + body_h]
+        rows += [Row()] * (body_h - len(rows))
+        if not self.image:
+            hints = hints[:2]
+        return [header('SSH key', more, w)] + rows + [footer(hints)]
+
+    def key(self, k):
+        if k in BACK_KEYS:
+            self.app.pop()
+        elif k in ('g', 'G') and not self.found:
+            self.generate()
+        elif not self.found:
+            return False
+        elif k in ('y', 'Y'):
+            self.app.copy(self.found[1], 'Copied the public key  (cz-peers-clip)')
+        elif k in ('t', 'T') and self.image:
+            self.as_text = not self.as_text
+            self.top = 0
+        elif k in UP_KEYS:
+            self.top -= 1
+        elif k in DOWN_KEYS:
+            self.top += 1
+        else:
+            return False
+        return True
+
+
 class MenuView(View):
     """A vertical list of choices; each item is (label, callback, hint)."""
 
@@ -960,9 +1296,12 @@ class ConfirmView(View):
 
 
 class SSHPrompt(View):
-    def __init__(self, app, node):
+    """User and port for ssh; install=True asks them for installing the key."""
+
+    def __init__(self, app, node, install=False):
         super().__init__(app)
         self.node = node
+        self.install = install
         saved = app.hosts.get(node.name, {})
         default_user = saved.get('user') or app.hosts.get('_default', {}).get('user') or ME
         self.fields = [['User', default_user], ['Port', str(saved.get('port', '22'))]]
@@ -970,7 +1309,10 @@ class SSHPrompt(View):
         self.fresh = True  # first keystroke replaces the suggested value
 
     def render(self, w, h):
-        rows = [header('SSH ' + self.node.name, self.node.ip, w), Row()]
+        title = ('Add key to ' if self.install else 'SSH ') + self.node.name
+        rows = [header(title, self.node.ip, w)]
+        if not self.install:
+            rows.append(Row())
         for i, (label, value) in enumerate(self.fields):
             focused = i == self.focus
             row = Row()
@@ -981,10 +1323,17 @@ class SSHPrompt(View):
             rows.append(row)
             rows.append(Row())
         user, port = self.fields[0][1], self.fields[1][1]
-        cmd = 'ssh %s%s@%s' % ('-p %s ' % port if port != '22' else '', user, ssh_alias(self.node))
-        rows.append(text_row('  ' + cmd, DIM))
-        rows += [Row()] * (h - 1 - len(rows))
-        return rows + [footer([('Enter', 'connect'), ('Tab', 'field'), ('Esc', 'back')])]
+        if self.install:
+            os_name = 'Windows' if self.node.os.lower() == 'windows' else 'it'
+            rows += [text_row(' ' + line, MUTED) for line in wrap(
+                'Logs in once with the password of %s on %s and adds this Cardputer\'s '
+                'key there.' % (user or 'the user', os_name), w - 2)]
+        else:
+            rows.append(text_row('  ' + ssh_shown(self.node, user, port), DIM))
+            if self.node.tailscale_ssh:
+                rows.append(text_row('  Tailscale SSH: no key needed', BLUE))
+        rows = rows[:h - 1] + [Row()] * max(0, h - 1 - len(rows))
+        return rows + [footer([('Enter', 'add key' if self.install else 'connect'), ('Tab', 'field'), ('Esc', 'back')])]
 
     def key(self, k):
         field = self.fields[self.focus]
@@ -1001,7 +1350,10 @@ class SSHPrompt(View):
                 self.app.flash('Port must be a number', RED)
             else:
                 self.app.pop()
-                self.app.ssh(self.node, user, port)
+                if self.install:
+                    self.app.install_key(self.node, user, port)
+                else:
+                    self.app.ssh(self.node, user, port)
         elif k == 'BS':
             field[1] = '' if self.fresh else field[1][:-1]
             self.fresh = False
@@ -1153,7 +1505,11 @@ class ListView(View):
             row = Row(bg=bg)
             row.add(CURSOR if selected else ' ', S(BLUE, bg, True))
             row.add(DOT_ON if p.online else DOT_OFF, S(GREEN if p.online else DIM, bg))
-            row.add(' ' + pad(p.name, name_w), S(WHITE if p.online else MUTED, bg, selected))
+            if p.tailscale_ssh:
+                row.add(' ' + pad(p.name, name_w - 2), S(WHITE if p.online else MUTED, bg, selected))
+                row.add(' ' + TS_SSH_MARK, S(BLUE, bg, True))
+            else:
+                row.add(' ' + pad(p.name, name_w), S(WHITE if p.online else MUTED, bg, selected))
             row.add(' ' + pad(p.ip, ip_w), S(MUTED if p.online else DIM, bg))
             link = 'EXIT' if p.exit_node else p.link
             lcol = YELLOW if p.exit_node or link.startswith('relay') else GREEN if link == 'direct' else MUTED if p.online else DIM
@@ -1215,10 +1571,12 @@ class ListView(View):
                 self.app.toggle_connection()
         elif k == 'l':
             self.app.login()
-        elif k in ('s', 'y', 'p', 'i', 'h'):
+        elif k in ('s', 'y', 'p', 'i', 'h', 'k'):
             node = self.current()
             if node:
                 self.app.node_action(k, node)
+        elif k == 'K':
+            self.app.push(KeyView(self.app))
         elif k == 'm':
             self.app.push(SelfView(self.app))
         elif k == '?':
@@ -1293,6 +1651,7 @@ class App:
     # -- actions
     def node_menu(self, node):
         items = [('SSH', lambda: self.node_action('s', node), 's'),
+                 ('Install my SSH key', lambda: self.node_action('k', node), 'k'),
                  ('Copy IP  ' + node.ip, lambda: self.node_action('y', node), 'y'),
                  ('Ping', lambda: self.node_action('p', node), 'p'),
                  ('Details', lambda: self.node_action('i', node), 'i'),
@@ -1313,6 +1672,8 @@ class App:
             self.stack.pop()
         if k == 's':
             self.push(SSHPrompt(self, node))
+        elif k == 'k':
+            self.push(SSHPrompt(self, node, install=True))
         elif k == 'y':
             self.copy(node.ip)
         elif k == 'p':
@@ -1324,23 +1685,110 @@ class App:
             self.term.run_interactive(['bash', '-i'], '\x1b[33m$IP=%s  $HOST=%s\x1b[0m  (exit to go back)' % (node.ip, node.name), env)
         return True
 
-    def copy(self, text):
+    def copy(self, text, message=None):
         while len(self.stack) > 1 and isinstance(self.stack[-1], MenuView):
             self.stack.pop()
         try:
             CLIP_FILE.parent.mkdir(parents=True, exist_ok=True)
             CLIP_FILE.write_text(text + '\n')
-            self.flash('Copied %s  (cz-peers-clip)' % text)
+            self.flash(message or 'Copied %s  (cz-peers-clip)' % text)
         except OSError as e:
             self.flash('Copy failed: %s' % e, RED)
 
-    def ssh(self, node, user, port):
-        self.hosts[node.name] = {'user': user, 'port': port}
+    def remember_host(self, node, user, port, **extra):
+        saved = self.hosts.get(node.name, {})
+        entry = {'user': user, 'port': port}
+        if saved.get('key') == user:  # the key was installed for this user
+            entry['key'] = user
+        entry.update(extra)
+        self.hosts[node.name] = entry
         self.hosts['_default'] = {'user': user}
         save_hosts(self.hosts)
+
+    def ssh(self, node, user, port):
+        self.remember_host(node, user, port)
         argv = ssh_argv(node, user, port)
-        shown = 'ssh %s%s@%s' % ('-p %s ' % port if port != '22' else '', user, ssh_alias(node))
-        self.term.run_interactive(argv, '\x1b[33m%s\x1b[0m  %s' % (shown, node.ip))
+        code, err = self.term.run_interactive(argv, '\x1b[33m%s\x1b[0m  %s' % (ssh_shown(node, user, port), node.ip),
+                                              capture=True)
+        if code == 255:
+            self.ssh_failed(node, user, port, err)
+        self.refresh_now()
+
+    def ssh_failed(self, node, user, port, err, installing=False):
+        """Say what to do next after ssh exited with 255."""
+        why, methods = ssh_failure(err)
+        where = '%s@%s' % (user, node.name)
+        if why == 'hostkey':
+            self.push(ConfirmView(
+                self, 'Host key changed', '%s now shows a different host key than the one saved in '
+                '~/.ssh/known_hosts (reinstalled, or a different machine on this IP). Forget the old '
+                'key and try again?' % node.name,
+                lambda: self.forget_host_key(node) and (self.install_key(node, user, port) if installing
+                                                         else self.ssh(node, user, port))))
+        elif why == 'denied' and node.tailscale_ssh:
+            self.flash('Tailscale SSH refused %s: check the tailnet SSH policy' % where, RED, 8)
+        elif why == 'denied' and installing:
+            self.flash('Wrong password for %s?' % where if 'password' in methods or 'keyboard-interactive' in methods
+                       else '%s takes no passwords: add the key by hand (K)' % node.name, RED, 8)
+        elif why == 'denied' and ('password' in methods or 'keyboard-interactive' in methods):
+            self.push(ConfirmView(
+                self, 'Key not accepted', '%s did not accept a key from this Cardputer. Add your SSH key '
+                'there now? You type the password once; ssh then logs in without it.' % where,
+                lambda: self.install_key(node, user, port)))
+        elif why == 'denied':
+            self.push(ConfirmView(
+                self, 'Key not accepted', '%s only takes keys, and none of this Cardputer\'s is in its '
+                'authorized_keys. Show your public key as a QR code to add it there by hand?' % where,
+                lambda: self.push(KeyView(self))))
+        elif why == 'refused':
+            hint = ' (Windows: turn on OpenSSH Server)' if node.os.lower() == 'windows' else ''
+            self.flash('No SSH server on %s port %s%s' % (node.name, port, hint), RED, 8)
+        elif why == 'timeout':
+            self.flash('%s did not answer: is it online?' % node.name, RED, 6)
+
+    def forget_host_key(self, node):
+        known = SSH_DIR / 'known_hosts'
+        names = {ssh_alias(node), node.ip, node.dns}
+        for name in filter(None, names):
+            try:
+                subprocess.run(['ssh-keygen', '-R', name, '-f', str(known)], capture_output=True,
+                               stdin=subprocess.DEVNULL, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        self.flash('Forgot the old host key of %s' % node.name, YELLOW)
+        return True
+
+    def install_key(self, node, user, port):
+        """Log in once (with the device's password) and add this Cardputer's
+        public key to the device's authorized_keys."""
+        found = find_key()
+        if not found:
+            try:
+                found = make_key()
+            except OSError as e:
+                self.flash('Could not make an SSH key: %s' % e, RED, 8)
+                return
+        priv, pub = found
+        self.remember_host(node, user, port)
+        argv = ssh_argv(node, user, port) + [install_command(node, pub)]
+        banner = ('\x1b[33mAdding this Cardputer\'s SSH key to %s@%s\x1b[0m\r\n'
+                  'Type the password of %s if asked.' % (user, node.name, user))
+        code, err = self.term.run_interactive(argv, banner, capture=True)
+        if code == 0:
+            try:
+                remember_key_in_config(ssh_alias(node), priv)
+            except OSError:
+                pass
+            self.remember_host(node, user, port, key=user)
+            self.push(ConfirmView(self, 'Key added', 'ssh to %s@%s now logs in with the key, without a '
+                                  'password. Connect now?' % (user, node.name),
+                                  lambda: self.ssh(node, user, port)))
+        elif code == 255:
+            self.ssh_failed(node, user, port, err, installing=True)
+            if not self.message and not isinstance(self.stack[-1], ConfirmView):
+                self.flash('Could not reach %s@%s' % (user, node.name), RED, 6)
+        else:
+            self.flash('Adding the key failed on %s (exit %d)' % (node.name, code), RED, 8)
         self.refresh_now()
 
     def api_failed(self, err):
@@ -1462,8 +1910,8 @@ class App:
             text, colour, until_t = self.message
             if time.monotonic() < until_t:
                 rows[-1] = Row([(' ' + text, S(BLACK, colour, True))], colour)
-                if isinstance(view, LoginView) and view.image:  # keep the QR's white cells
-                    rows[-1].segs.insert(0, (' ' * LoginView.QR_COLS, S(WHITE, WHITE)))
+                if hasattr(view, 'overlay_image') and view.overlay_image():  # keep the QR's white cells
+                    rows[-1].segs.insert(0, (' ' * view.QR_COLS, S(WHITE, WHITE)))
             else:
                 self.message = None
         out = ['\x1b[?25l']

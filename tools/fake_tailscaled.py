@@ -43,7 +43,8 @@ def _peer(i, name, ip, os_, online=True, **extra):
 
 PEERS = {'k%d' % i: p for i, p in enumerate([
     _peer(1, 'laptop', '100.64.12.7', 'macOS', CurAddr='192.168.1.20:41641', LastHandshake=_ago(30)),
-    _peer(2, 'homeserver', '100.88.3.21', 'linux', CurAddr='192.168.1.10:41641', ExitNodeOption=True),
+    _peer(2, 'homeserver', '100.88.3.21', 'linux', CurAddr='192.168.1.10:41641', ExitNodeOption=True,
+          sshHostKeys=['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPlaceholderPlaceholderPlaceholderPlace']),
     _peer(3, 'vps-tokyo', '100.71.40.9', 'linux', Relay='tok', Active=True, ExitNodeOption=True, ExitNode=True),
     _peer(4, 'raspberrypi', '100.77.19.2', 'linux', CurAddr='192.168.1.31:41641'),
     _peer(5, 'pixel-8', '100.92.5.66', 'android'),
@@ -51,6 +52,8 @@ PEERS = {'k%d' % i: p for i, p in enumerate([
     _peer(7, 'nas', '100.66.8.14', 'linux', online=False, LastSeen=_ago(2 * 3600)),
     _peer(8, 'old-thinkpad', '100.99.61.5', 'linux', online=False, LastSeen=_ago(9 * 86400)),
 ], 1)}
+if os.environ.get('FAKE_LOOPBACK'):  # a "device" that is this machine's own sshd, for testing ssh errors
+    PEERS['loop'] = _peer(9, 'aaa-loopback', '127.0.0.1', 'linux', CurAddr='127.0.0.1:41641')
 
 
 def status():
